@@ -13,6 +13,10 @@ function M.create(env)
   local pull_rebase = pull_rebase_entry:is_set() and pull_rebase_entry.value or "false"
   local has_upstream = git.branch.upstream() ~= nil
 
+  -- Check if auto-stashing is enabled in git config
+  local autostash_entry = git.config.get("rebase.autostash")
+  local autostash_enabled = autostash_entry:is_set() and autostash_entry.value == "true"
+
   local p = popup
     .builder()
     :name("NeogitBranchPopup")
@@ -42,6 +46,7 @@ function M.create(env)
       options = config_actions.remotes_for_config(),
     })
     :switch("r", "recurse-submodules", "Recurse submodules when checking out an existing branch")
+    :switch("s", "stash", "Stash uncommitted changes when switching branches", { enabled = autostash_enabled })
     :group_heading("Checkout")
     :action("b", "branch/revision", actions.checkout_branch_revision)
     :action("l", "local branch", actions.checkout_local_branch)

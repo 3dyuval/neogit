@@ -252,6 +252,7 @@ end
 ---| "CherryPickPopup"
 ---| "BisectPopup"
 ---| "BranchPopup"
+---| "ConfigPopup"
 ---| "FetchPopup"
 ---| "ResetPopup"
 ---| "RemotePopup"
@@ -655,6 +656,7 @@ function M.get_default_values()
         ["w"] = "WorktreePopup",
         ["c"] = "CommitPopup",
         ["f"] = "FetchPopup",
+        ["I"] = "ConfigPopup",
         ["l"] = "LogPopup",
         ["L"] = "MarginPopup",
         ["m"] = "MergePopup",

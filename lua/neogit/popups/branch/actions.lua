@@ -21,7 +21,22 @@ local function fetch_remote_branch(target)
 end
 
 local function checkout_branch(target, args)
-  local result = git.branch.checkout(target, args)
+  local should_stash = vim.tbl_contains(args, "--stash")
+  local stashed = false
+
+  -- Handle stash logic before checkout
+  if should_stash and git.status.anything_unstaged() then
+    git.stash.push { message = "neogit: auto-stash before checkout" }
+    notification.info("Stashed uncommitted changes before checkout")
+    stashed = true
+  end
+
+  -- Filter out --stash since it's not a real git checkout flag
+  local filtered_args = vim.tbl_filter(function(arg)
+    return arg ~= "--stash"
+  end, args)
+
+  local result = git.branch.checkout(target, filtered_args)
   if result:failure() then
     notification.error(table.concat(result.stderr, "\n"))
     return
@@ -29,6 +44,12 @@ local function checkout_branch(target, args)
 
   event.send("BranchCheckout", { branch_name = target })
   notification.info("Checked out branch " .. target)
+
+  -- Pop the stash after successful checkout
+  if stashed then
+    git.stash.pop()
+    notification.info("Restored stashed changes after checkout")
+  end
 
   if config.values.fetch_after_checkout then
     a.void(function()

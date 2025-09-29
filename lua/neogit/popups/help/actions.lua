@@ -91,6 +91,7 @@ M.popups = function(env)
         p(env.cherry_pick)
       end),
     },
+    { "ConfigPopup", "Config", popups.open("config") },
     { "BranchPopup", "Branch", popups.open("branch", function(p)
       p(env.branch)
     end) },

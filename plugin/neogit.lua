@@ -40,3 +40,9 @@ end, {
   nargs = "?",
   desc = "Open git commit view for specified commit, or HEAD",
 })
+
+api.nvim_create_user_command("NeogitConfig", function()
+  require("neogit.popups.config").create()
+end, {
+  desc = "Open git configuration popup",
+})
