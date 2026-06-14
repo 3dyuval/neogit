@@ -1,6 +1,6 @@
 -- NOTE: `v_` prefix stands for visual mode actions, `n_` for normal mode.
 --
-local a = require("plenary.async")
+local a = require("neogit.lib.async")
 local git = require("neogit.lib.git")
 local popups = require("neogit.popups")
 local logger = require("neogit.logger")
@@ -8,6 +8,7 @@ local input = require("neogit.lib.input")
 local notification = require("neogit.lib.notification")
 local util = require("neogit.lib.util")
 local config = require("neogit.config")
+local jump = require("neogit.lib.jump")
 
 local FuzzyFinderBuffer = require("neogit.buffers.fuzzy_finder")
 
@@ -44,7 +45,7 @@ local function cleanup_items(items)
 
     local bufnr = fn.bufnr(path)
     if bufnr > 0 then
-      api.nvim_buf_delete(bufnr, { force = false })
+      pcall(api.nvim_buf_delete, bufnr, { force = false })
     end
 
     fn.delete(fn.fnameescape(path))
@@ -53,7 +54,7 @@ end
 
 ---@param self StatusBuffer
 ---@param item StatusItem
----@return table|nil
+---@return integer[]|nil
 local function translate_cursor_location(self, item)
   if rawget(item, "diff") then
     local line = self.buffer:cursor_line()
@@ -61,15 +62,7 @@ local function translate_cursor_location(self, item)
     for _, hunk in ipairs(item.diff.hunks) do
       if line >= hunk.first and line <= hunk.last then
         local offset = line - hunk.first
-        local row = hunk.disk_from + offset - 1
-
-        for i = 1, offset do
-          -- If the line is a deletion, we need to adjust the row
-          if string.sub(hunk.lines[i], 1, 1) == "-" then
-            row = row - 1
-          end
-        end
-
+        local row = jump.adjust_row(hunk.disk_from, offset, hunk.lines, "-")
         return { row, 0 }
       end
     end
@@ -77,17 +70,7 @@ local function translate_cursor_location(self, item)
 end
 
 local function open(type, path, cursor)
-  local command = ("silent! %s %s | %s"):format(type, fn.fnameescape(path), cursor and cursor[1] or "1")
-
-  logger.debug("[Status - Open] '" .. command .. "'")
-
-  vim.cmd(command)
-
-  command = "redraw! | norm! zz"
-
-  logger.debug("[Status - Open] '" .. command .. "'")
-
-  vim.cmd(command)
+  jump.open(type, path, cursor, "[Status - Open]")
 end
 
 local M = {}
@@ -198,9 +181,9 @@ M.v_discard = function(self)
       end
 
       if #staged_files_modified > 0 then
-        local paths = git.index.reset(util.map(staged_files_modified, function(item)
+        local paths = util.map(staged_files_modified, function(item)
           return item.escaped_path
-        end))
+        end)
         git.index.reset(paths)
         git.index.checkout(paths)
       end
@@ -212,7 +195,7 @@ M.v_discard = function(self)
         end
       end
 
-      self:dispatch_refresh({ update_diff = invalidated_diffs }, "v_discard")
+      self:dispatch_refresh({ update_diffs = invalidated_diffs }, "v_discard")
     end
   end)
 end
@@ -1162,8 +1145,11 @@ M.n_stage = function(self)
       end
 
       if selection.item and selection.item.mode == "UU" then
-        if config.check_integration("diffview") then
-          require("neogit.integrations.diffview").open("conflict", selection.item.name, {
+        local diff_viewer = config.get_diff_viewer()
+        if diff_viewer and git.merge.is_conflicted(selection.item.escaped_path) then
+          local integration = diff_viewer == "codediff" and require("neogit.integrations.codediff")
+            or require("neogit.integrations.diffview")
+          integration.open("conflict", selection.item.name, {
             on_close = {
               handle = self.buffer.handle,
               fn = function()
@@ -1203,8 +1189,11 @@ M.n_stage = function(self)
         self:dispatch_refresh({ update_diffs = { "untracked:*" } }, "n_stage")
       elseif section.options.section == "unstaged" then
         if git.status.any_unmerged() then
-          if config.check_integration("diffview") then
-            require("neogit.integrations.diffview").open("conflict", nil, {
+          local diff_viewer = config.get_diff_viewer()
+          if diff_viewer then
+            local integration = diff_viewer == "codediff" and require("neogit.integrations.codediff")
+              or require("neogit.integrations.diffview")
+            integration.open("conflict", nil, {
               on_close = {
                 handle = self.buffer.handle,
                 fn = function()
@@ -1293,6 +1282,18 @@ M.n_unstage_staged = function(self)
   end)
 end
 
+---Opens neogit on the parent repo if if we are in a submodule
+---@param self StatusBuffer
+M.n_goto_parent_repo = function(self)
+  return function()
+    local parent = self:parent_repo()
+    if parent then
+      self:close()
+      require("neogit").open { cwd = parent }
+    end
+  end
+end
+
 ---@param self StatusBuffer
 ---@return fun(): nil
 M.n_goto_file = function(self)
@@ -1301,6 +1302,12 @@ M.n_goto_file = function(self)
 
     -- Goto FILE
     if item and item.absolute_path then
+      if self:has_submodule(item.absolute_path) then
+        self:close()
+        require("neogit").open { cwd = item.absolute_path }
+        return
+      end
+
       local cursor = translate_cursor_location(self, item)
       self:close()
       vim.schedule_wrap(open)("edit", item.absolute_path, cursor)
@@ -1650,6 +1657,113 @@ M.n_prev_section = function(self)
 
     self.buffer:win_exec("norm! gg")
   end
+end
+
+---@param self StatusBuffer
+---@return fun(): nil
+M.n_reverse = function(self)
+  return a.void(function()
+    git.index.update()
+
+    local selection = self.buffer.ui:get_selection()
+    if not selection.section then
+      return
+    end
+
+    local section = selection.section.name
+
+    if section == "untracked" then
+      notification.warn("Cannot reverse untracked changes")
+      return
+    end
+
+    if section == "unstaged" then
+      notification.warn("Cannot reverse unstaged changes")
+      return
+    end
+
+    if section ~= "staged" then
+      return
+    end
+
+    local message, action
+    local refresh = {}
+
+    if selection.item and selection.item.first == fn.line(".") then -- Reverse File
+      message = ("Reverse %q?"):format(selection.item.name)
+      action = function()
+        for _, hunk in ipairs(selection.item.diff and selection.item.diff.hunks or {}) do
+          local patch = git.index.generate_patch(hunk, { reverse = true })
+          git.index.apply(patch, { reverse = true })
+        end
+      end
+      refresh = { update_diffs = { "staged:" .. selection.item.name } }
+    elseif selection.item then -- Reverse Hunk
+      local hunk =
+        self.buffer.ui:item_hunks(selection.item, selection.first_line, selection.last_line, false)[1]
+      message = "Reverse hunk?"
+      action = function()
+        local patch = git.index.generate_patch(hunk, { reverse = true })
+        git.index.apply(patch, { reverse = true })
+      end
+      refresh = { update_diffs = { "staged:" .. selection.item.name } }
+    else -- Reverse Section
+      message = ("Reverse %s files?"):format(#selection.section.items)
+      action = function()
+        for _, item in ipairs(selection.section.items) do
+          for _, hunk in ipairs(item.diff and item.diff.hunks or {}) do
+            local patch = git.index.generate_patch(hunk, { reverse = true })
+            git.index.apply(patch, { reverse = true })
+          end
+        end
+      end
+      refresh = { update_diffs = { "staged:*" } }
+    end
+
+    if action and input.get_permission(message) then
+      action()
+      self:dispatch_refresh(refresh, "n_reverse")
+    end
+  end)
+end
+
+---@param self StatusBuffer
+---@return fun(): nil
+M.v_reverse = function(self)
+  return a.void(function()
+    local selection = self.buffer.ui:get_selection()
+
+    local patches = {}
+    local invalidated_diffs = {}
+
+    for _, section in ipairs(selection.sections) do
+      if section.name == "untracked" or section.name == "unstaged" then
+        notification.warn("Cannot reverse untracked or unstaged changes")
+        return
+      end
+
+      if section.name == "staged" then
+        for _, item in ipairs(section.items) do
+          local hunks = self.buffer.ui:item_hunks(item, selection.first_line, selection.last_line, true)
+          table.insert(invalidated_diffs, "*:" .. item.name)
+
+          for _, hunk in ipairs(hunks) do
+            table.insert(
+              patches,
+              git.index.generate_patch(hunk, { from = hunk.from, to = hunk.to, reverse = true })
+            )
+          end
+        end
+      end
+    end
+
+    if #patches > 0 and input.get_permission("Reverse selection?") then
+      for _, patch in ipairs(patches) do
+        git.index.apply(patch, { reverse = true })
+      end
+      self:dispatch_refresh({ update_diffs = invalidated_diffs }, "v_reverse")
+    end
+  end)
 end
 
 return M

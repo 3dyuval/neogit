@@ -6,7 +6,7 @@ local input = require("neogit.lib.input")
 local util = require("neogit.lib.util")
 local notification = require("neogit.lib.notification")
 local event = require("neogit.lib.event")
-local a = require("plenary.async")
+local a = require("neogit.lib.async")
 
 local FuzzyFinderBuffer = require("neogit.buffers.fuzzy_finder")
 local BranchConfigPopup = require("neogit.popups.branch_config")
@@ -261,7 +261,8 @@ function M.rename_branch()
     return
   end
 
-  local new_name = get_branch_name_user_input(("Rename '%s' to"):format(selected_branch))
+  local default_branch_name = config.values.initial_branch_rename or selected_branch
+  local new_name = get_branch_name_user_input(("Rename '%s' to"):format(selected_branch), default_branch_name)
   if not new_name then
     return
   end
